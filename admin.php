@@ -1,0 +1,40 @@
+<?php
+require 'config.php'; require_role('admin');
+$action=$_POST['action']??'';
+try{
+ if($action==='add'){
+  $id=trim($_POST['driver_id']);$name=trim($_POST['driver_name']);$plate=trim($_POST['plate']);
+  if($id===''||$name===''||$plate==='') throw new Exception('Driver ID, Name and Plate Number are required.');
+  $st=$pdo->prepare('INSERT INTO drivers(driver_id,driver_name,plate_number) VALUES(?,?,?)');$st->execute([$id,$name,$plate]);
+  $pk=$pdo->lastInsertId();$pdo->prepare('INSERT INTO earnings(driver_pk) VALUES(?)')->execute([$pk]); go('admin.php','Driver added successfully. The driver may now log in.');
+ }
+ if($action==='update'){
+  $id=trim($_POST['driver_id']);$name=trim($_POST['driver_name']);$plate=trim($_POST['plate']);
+  $st=$pdo->prepare('UPDATE drivers SET driver_name=?,plate_number=? WHERE driver_id=? AND is_archived=0');$st->execute([$name,$plate,$id]);
+  go('admin.php',$st->rowCount()?'Driver updated successfully.':'Driver not found or already archived.',$st->rowCount()?'success':'error');
+ }
+ if($action==='archive'){
+  $id=trim($_POST['driver_id']);$st=$pdo->prepare('UPDATE drivers SET is_archived=1,archived_at=NOW() WHERE driver_id=?');$st->execute([$id]);$pdo->prepare('UPDATE departures d JOIN drivers x ON x.id=d.driver_pk SET d.is_active=0 WHERE x.driver_id=?')->execute([$id]);go('admin.php',$st->rowCount()?'Driver archived.':'Driver not found.',$st->rowCount()?'success':'error');
+ }
+ if($action==='search'){
+  $id=trim($_POST['driver_id']);$st=$pdo->prepare('SELECT * FROM drivers WHERE driver_id=?');$st->execute([$id]);$found=$st->fetch(); if(!$found) go('admin.php','Driver ID not found.','error');
+ }
+ if($action==='earn'){
+  $id=trim($_POST['stat_id']);$amount=(float)$_POST['earning_amount']; if($amount<=0) throw new Exception('Earning amount must be greater than zero.');
+  $st=$pdo->prepare('SELECT id FROM drivers WHERE driver_id=? AND is_archived=0');$st->execute([$id]);$d=$st->fetch();if(!$d)throw new Exception('Active Driver ID not found.');
+  $pdo->beginTransaction();$pdo->prepare('INSERT IGNORE INTO earnings(driver_pk,total_earnings) VALUES(?,0)')->execute([$d['id']]);$pdo->prepare('UPDATE earnings SET total_earnings=total_earnings+? WHERE driver_pk=?')->execute([$amount,$d['id']]);$pdo->prepare("INSERT INTO earning_transactions(driver_pk,transaction_type,amount) VALUES(?,'EARNING',?)")->execute([$d['id'],$amount]);$pdo->commit();go('admin.php','Earning added successfully.');
+ }
+ if($action==='deduct'){
+  $id=trim($_POST['stat_id']);$amount=(float)$_POST['deduction_amount']; if($amount<=0) throw new Exception('Deduction must be greater than zero.');
+  $st=$pdo->prepare('SELECT id FROM drivers WHERE driver_id=? AND is_archived=0');$st->execute([$id]);$d=$st->fetch();if(!$d)throw new Exception('Active Driver ID not found.');
+  $pdo->beginTransaction();$pdo->prepare('INSERT IGNORE INTO earnings(driver_pk,total_earnings) VALUES(?,0)')->execute([$d['id']]);$pdo->prepare('UPDATE earnings SET total_earnings=GREATEST(0,total_earnings-?) WHERE driver_pk=?')->execute([$amount,$d['id']]);$pdo->prepare("INSERT INTO earning_transactions(driver_pk,transaction_type,amount) VALUES(?,'PENALTY',?)")->execute([$d['id'],$amount]);$pdo->commit();go('admin.php','Penalty deduction recorded.');
+ }
+}catch(Throwable $ex){if($pdo->inTransaction())$pdo->rollBack();go('admin.php',$ex->getMessage(),'error');}
+
+$drivers=$pdo->query("SELECT * FROM drivers WHERE is_archived=0 ORDER BY id DESC")->fetchAll();
+$departures=$pdo->query("SELECT d.driver_id,d.driver_name,p.route_code,p.from_location,p.to_location,p.departure_hour,p.departure_period,p.is_active,p.round_trips,p.departed_at FROM drivers d LEFT JOIN departures p ON p.driver_pk=d.id WHERE d.is_archived=0 ORDER BY d.driver_id")->fetchAll();
+$earnings=$pdo->query("SELECT d.driver_id,d.driver_name,d.plate_number,CASE WHEN COALESCE(p.is_active,0)=1 THEN 'Available' ELSE 'Not Available' END status,COALESCE(e.total_earnings,0) total_earnings FROM drivers d LEFT JOIN departures p ON p.driver_pk=d.id LEFT JOIN earnings e ON e.driver_pk=d.id WHERE d.is_archived=0 ORDER BY d.driver_id")->fetchAll();
+$f=flash();
+?><!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TranSeat - Administrator</title><link rel="stylesheet" href="style.css"></head><body><header class="topbar"><div class="brand"><img src="assets/logo.jpg">Administrator Dashboard</div><nav class="nav"><span>admin123</span><a href="logout.php">Log Out</a></nav></header><main class="container"><?php if($f):?><div class="message <?=$f['type']?>"><?=e($f['message'])?></div><?php endif;?><section class="card"><h2>Driver Management</h2><form method="post"><input type="hidden" name="action" value="<?=isset($found)?'search':''?>"><div class="form-grid"><div class="field"><label>Driver ID</label><input name="driver_id" id="txtIDManage" value="<?=e($found['driver_id']??'')?>" required></div><div class="field"><label>Name</label><input name="driver_name" id="txtDriverName" value="<?=e($found['driver_name']??'')?>" required></div><div class="field"><label>Plate Number</label><input name="plate" id="txtDriverPlate" value="<?=e($found['plate_number']??'')?>" required></div></div><div class="actions"><button class="btn" name="action" value="add" id="btnAddDriver">Add Driver</button><button class="btn secondary" name="action" value="update" id="btnUpdateDriver">Update</button><button class="btn danger" name="action" value="archive" id="btnArchiveDriver">Archive</button><button class="btn warning" name="action" value="search" id="btnSearch">Search</button></div></form><div class="table-wrap"><table id="tblDriverList"><thead><tr><th>Driver ID</th><th>Driver Name</th><th>Driver Plate No.</th></tr></thead><tbody><?php foreach($drivers as $d):?><tr><td><?=e($d['driver_id'])?></td><td><?=e($d['driver_name'])?></td><td><?=e($d['plate_number'])?></td></tr><?php endforeach;?></tbody></table></div></section>
+<section class="card"><h2>Driver Status</h2><div class="table-wrap"><table id="tblDepartureStatus"><thead><tr><th>Driver ID</th><th>Departure Set</th><th>Status</th><th>Round Trip(s)</th><th>Route</th><th>Current Stop</th></tr></thead><tbody><?php foreach($departures as $d):?><tr><td><?=e($d['driver_id'])?></td><td><?=e($d['departure_hour']??'')?> <?=e($d['departure_period']??'')?> <?=e($d['departed_at']??'')?></td><td><span class="badge <?=($d['is_active']?'available':'unavailable')?>"><?=($d['is_active']?'Available':'Not Available')?></span></td><td><?=e($d['round_trips']??0)?></td><td><?=e($d['route_code']??'—')?></td><td><?=e($d['current_stop']??'—')?></td></tr><?php endforeach;?></tbody></table></div></section>
+<section class="card"><h2>Driver Earnings</h2><form method="post"><div class="form-grid"><div class="field"><label>Driver ID</label><input name="stat_id" id="txtIDStat" required></div><div class="field"><label>Add Earnings</label><input type="number" min="0.01" step="0.01" name="earning_amount" id="txtAddEarningStatus"></div><div class="field"><label>Deduction from Penalty</label><input type="number" min="0.01" step="0.01" name="deduction_amount" id="txtDeduction"></div></div><div class="actions"><button class="btn success" name="action" value="earn" id="btnAddEarning">Add Earning</button><button class="btn danger" name="action" value="deduct" id="btnDeductEarning">Deduct Earning</button></div></form><div class="table-wrap"><table id="tblDriverList"><thead><tr><th>Driver ID</th><th>Driver Name</th><th>Driver Plate No.</th><th>Status</th><th>Total Earnings</th></tr></thead><tbody><?php foreach($earnings as $d):?><tr><td><?=e($d['driver_id'])?></td><td><?=e($d['driver_name'])?></td><td><?=e($d['plate_number'])?></td><td><?=e($d['status'])?></td><td>₱<?=number_format($d['total_earnings'],2)?></td></tr><?php endforeach;?></tbody></table></div></section></main></body></html>
